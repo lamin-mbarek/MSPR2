@@ -50,7 +50,7 @@ alertes automatiques, tri FIFO, multi-pays (Brésil, Équateur, Colombie).
 
 ### Organisation des dossiers
 ```
-g/
+MSPR2/
 ├── backend/        backend-country/  ·  backend-central/  ·  db/
 ├── iot-simulator/  (capteurs ESP32+DHT22 simulés)
 ├── node-red/       (alerting MQTT → email/log)
@@ -62,7 +62,6 @@ g/
 ## Lancement (une commande)
 
 ```bash
-cd g
 cp .env.example .env        # optionnel (valeurs par défaut OK, mode email démo console)
 docker compose up --build
 ```
