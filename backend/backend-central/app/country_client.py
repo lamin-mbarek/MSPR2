@@ -1,63 +1,59 @@
+"""Client HTTP vers les backends pays + helpers de routage/consolidation."""
+import asyncio
+import re
+
 import httpx
+
+from . import config
 from .config import COUNTRIES
 
-TIMEOUT = 8.0
+_client = httpx.AsyncClient(timeout=10.0)
 
 
-async def _get(country: str, path: str, params: dict = None):
-    base = COUNTRIES.get(country)
-    if not base:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.get(f"{base}{path}", params=params)
-            r.raise_for_status()
-            return r.json()
-    except Exception as e:
-        print(f"[CENTRAL] GET {country}{path} -> {e}")
-        return None
+async def close_client():
+    await _client.aclose()
 
 
-async def _post(country: str, path: str, json_body: dict = None, params: dict = None):
-    base = COUNTRIES.get(country)
-    if not base:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.post(f"{base}{path}", json=json_body, params=params)
-            r.raise_for_status()
-            return r.json()
-    except Exception as e:
-        print(f"[CENTRAL] POST {country}{path} -> {e}")
-        return None
+def country_from_id(identifier: str):
+    """Déduit le pays à partir d'un id (w-br-1, FK-BR-SP-001, BR-AL-xxxx)."""
+    code_map = config.code_to_country()
+    for token in re.split(r"[-_]", identifier.upper()):
+        if token in code_map:
+            return code_map[token]
+    return None
 
 
-async def _delete(country: str, path: str):
-    base = COUNTRIES.get(country)
-    if not base:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.delete(f"{base}{path}")
-            r.raise_for_status()
-            return r.json()
-    except Exception as e:
-        print(f"[CENTRAL] DELETE {country}{path} -> {e}")
-        return None
+async def call(country: str, method: str, path: str, *, params=None, json=None):
+    """Appel d'un backend pays. Renvoie (status_code, data)."""
+    base = COUNTRIES[country]["url"]
+    resp = await _client.request(method, f"{base}{path}", params=params, json=json)
+    data = resp.json() if resp.content else None
+    return resp.status_code, data
 
 
-# ---------- Lectures ----------
-async def get_lots(country):            return await _get(country, "/lots") or []
-async def get_lots_fifo(country):       return await _get(country, "/lots/fifo") or []
-async def get_alerts(country):          return await _get(country, "/alerts") or []
-async def get_alerts_critical(country): return await _get(country, "/alerts/critical") or []
-async def get_mesures(country, limit=50): return await _get(country, "/mesures", {"limit": limit}) or []
-async def get_kpis(country):            return await _get(country, "/kpis")
-async def get_entrepots(country):       return await _get(country, "/entrepots") or []
+async def get(country: str, path: str, params=None):
+    _, data = await call(country, "GET", path, params=params)
+    return data
 
 
-# ---------- Écritures (proxy vers le pays) ----------
-async def create_lot(country, body):        return await _post(country, "/lots", json_body=body)
-async def create_mesure(country, body):     return await _post(country, "/mesures", json_body=body)
-async def delete_lot(country, lot_id):      return await _delete(country, f"/lots/{lot_id}")
-async def check_expiration(country):        return await _post(country, "/lots/check-expiration")
+async def fan_out(method: str, path: str, *, params=None):
+    """Interroge les 3 pays en parallèle. Renvoie la liste des résultats (pays joignables)."""
+    async def _one(country):
+        try:
+            _, data = await call(country, method, path, params=params)
+            return data
+        except Exception as exc:  # noqa: BLE001
+            print(f"[CENTRAL] {country} injoignable sur {path}: {exc}", flush=True)
+            return None
+
+    results = await asyncio.gather(*[_one(c) for c in COUNTRIES])
+    return [r for r in results if r is not None]
+
+
+async def fan_out_concat(path: str, *, params=None):
+    """Concatène les listes renvoyées par chaque pays."""
+    merged = []
+    for data in await fan_out("GET", path, params=params):
+        if isinstance(data, list):
+            merged.extend(data)
+    return merged
